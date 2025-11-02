@@ -87,93 +87,116 @@ export const calculateCycles = (
   baking_timestamp: number,
   filling_timestamp: number
 ) => {
-  console.log("Half-day mode:", half_day);
-
   const timeToSeconds = (t: string) => {
-    const [h, m, s] = t.split(":").map(Number);
-    return h * 3600 + m * 60 + s;
-  };
+    const [h, m, s] = t.split(":").map(Number)
+    return h * 3600 + m * 60 + s
+  }
 
   const formatTime = (seconds: number): string => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return [h, m, s].map((v) => v.toString().padStart(2, "0")).join(":");
-  };
-
-  const opsStart = timeToSeconds(operationStartTime);
-  let opsEnd = timeToSeconds(operationEndTime);
-
-  // Handle half-day mode
-  if (half_day) {
-    const duration = opsEnd - opsStart;
-    opsEnd = opsStart + duration / 2;
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    const s = Math.floor(seconds % 60)
+    return [h, m, s].map((v) => v.toString().padStart(2, "0")).join(":")
   }
 
-  // Filling is now handled separately
-  const prepTime = filling_prep_duration + mixing_duration;
+  const opsStart = timeToSeconds(operationStartTime)
+  let opsEnd = timeToSeconds(operationEndTime)
 
-  const ovenTimers = Array(oven_count).fill(opsStart);
-  let currentTime = opsStart;
-  let cycleNumber = 0;
-  let traysCompleted = 0;
+  if (half_day) {
+    const duration = opsEnd - opsStart
+    opsEnd = opsStart + duration / 2
+  }
 
   const cyclesData: {
-    cycleNumber: number;
-    startTime: string;
-    endTime: string;
-    durationSeconds: number;
-    durationFormatted: string;
-  }[] = [];
+    cycleNumber: number
+    startTime: string
+    endTime: string
+    durationSeconds: number
+    durationFormatted: string
+    phases: {
+      mixing: { start: string; end: string }
+      filling: { start: string; end: string }
+      baking: { start: string; end: string }
+    }
+  }[] = []
 
-  while (currentTime < opsEnd) {
-    const prepStart = currentTime;
-    const mixingStart = prepStart + filling_prep_duration;
-    const fillingStart = mixingStart + filling_timestamp;
-    const bakingStart = fillingStart + baking_timestamp;
-    const cycleEnd = bakingStart + baking_duration;
+  const ovenTimers = Array(oven_count).fill(opsStart)
+  let mixingStart = opsStart
+  let cycleNumber = 0
+  let traysCompleted = 0
 
-    // Stop if beyond operation hours
-    if (cycleEnd > opsEnd) break;
+  while (true) {
+    cycleNumber++
 
-    // Allocate trays to ovens
+    // 🧪 Mixing phase
+    const mixingEnd = mixingStart + filling_prep_duration + mixing_duration
+
+    // 🕒 Filling starts after `filling_timestamp` from mixing start
+    const fillingStart = mixingStart + filling_timestamp
+    const fillingEnd = fillingStart + filling_duration
+
+    // 🔥 Baking starts after `baking_timestamp` from filling start
+    const bakingStart = fillingStart + baking_timestamp
+    const bakingEnd = bakingStart + baking_duration
+
+    // 🏁 Cycle end (for reporting)
+    const cycleEnd = bakingEnd
+
+    // Stop if bakingEnd exceeds operation hours
+    if (bakingEnd > opsEnd) break
+
+    // 🔹 Allocate trays to ovens (simulate multiple ovens)
     for (let i = 0; i < trays_per_cycle; i++) {
-      const ovenIndex = ovenTimers.indexOf(Math.min(...ovenTimers));
-      ovenTimers[ovenIndex] = Math.max(ovenTimers[ovenIndex], bakingStart) + baking_duration;
-      traysCompleted++;
+      const ovenIndex = ovenTimers.indexOf(Math.min(...ovenTimers))
+      ovenTimers[ovenIndex] =
+        Math.max(ovenTimers[ovenIndex], bakingStart) + baking_duration
+      traysCompleted++
     }
 
-    cycleNumber++;
-
-    const cycleDuration = cycleEnd - prepStart;
-
-    // ✅ Keep only the fields your interface defines
+    // 🔹 Record cycle info with all overlapping phases
     cyclesData.push({
       cycleNumber,
-      startTime: formatTime(mixingStart), // main process start
-      endTime: formatTime(cycleEnd),      // final bake end
-      durationSeconds: cycleDuration,
-      durationFormatted: formatTime(cycleDuration),
-    });
+      startTime: formatTime(mixingStart),
+      endTime: formatTime(cycleEnd),
+      durationSeconds: cycleEnd - mixingStart,
+      durationFormatted: formatTime(cycleEnd - mixingStart),
+      phases: {
+        mixing: { start: formatTime(mixingStart), end: formatTime(mixingEnd) },
+        filling: { start: formatTime(fillingStart), end: formatTime(fillingEnd) },
+        baking: { start: formatTime(bakingStart), end: formatTime(bakingEnd) },
+      },
+    })
 
-    // Move to next cycle start (after prep + mixing)
-    currentTime = prepStart + prepTime;
+    // 🔄 Here’s the **key**:
+    // Next cycle starts mixing *immediately after previous mixing ends*,
+    // not after baking. → Overlapping behavior!
+    mixingStart = mixingEnd
+
+    if (mixingStart >= opsEnd) break
   }
 
-  const fullCycles = Math.floor(traysCompleted / trays_per_cycle);
-  const eggPiesPerCycle = trays_per_cycle * egg_pies_per_tray;
-
+  const fullCycles = Math.floor(traysCompleted / trays_per_cycle)
+  const eggPiesPerCycle = trays_per_cycle * egg_pies_per_tray
+  const totalEggPies = eggPiesPerCycle * oven_count * fullCycles
+  
   return {
     fullCycles,
     operationsStart: operationStartTime,
     operationsEnd: formatTime(opsEnd),
-    totalEggPies: eggPiesPerCycle * fullCycles * oven_count,
+    totalEggPies,
     eggPiesPerCycle,
-    totalMixingFillingDuration: formatTime(prepTime + filling_duration),
-    singleCycleDuration: formatTime(prepTime + filling_duration + baking_duration),
+    singleCycleDuration: formatTime(
+      filling_prep_duration +
+      mixing_duration +
+      filling_duration +
+      baking_duration
+    ),
     cyclesData,
-  };
-};
+  }
+}
+
+
+
 
 
 

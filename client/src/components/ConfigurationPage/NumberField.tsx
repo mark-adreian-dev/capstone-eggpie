@@ -3,10 +3,11 @@ import { Input } from "../ui/input"
 import { type LucideIcon } from "lucide-react"
 
 interface NumberFieldProps<T extends object> {
-  label: string
+  label?: string
   name: keyof T
-  Icon: LucideIcon
+  Icon?: LucideIcon
   value: string | number
+  className? : string 
   onChange: (field: keyof T, value: string | number) => void
 }
 
@@ -16,12 +17,13 @@ export default function NumberField<T extends object>({
   name,
   value,
   onChange,
+  className
 }: NumberFieldProps<T>) {
 
   return (
-    <div className="flex flex-col gap-3 w-full">
+    <div className={`${className ? className : "w-full flex flex-col gap-3 "}`}>
       <Label htmlFor={String(name)} className="px-1">
-        <Icon />
+        {Icon && <Icon />}
         <p>{label}</p>
       </Label>
       <Input

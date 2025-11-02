@@ -1,5 +1,7 @@
-import { useState, useContext, useMemo, useEffect } from "react";
+/* eslint-disable react-hooks/exhaustive-deps */
+import { useState, useContext, useMemo, useEffect, useRef } from "react";
 import Clock, { type Time } from "@/components/TimerPage/Clock";
+import TextClock from "@/components/TimerPage/TextClock";
 import { ProcessSettingsContext } from "@/context/ProcessSettingsContext";
 import PushableButton from "@/components/global/PushableButton";
 import {
@@ -12,12 +14,25 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { toSeconds } from "@/lib/utils";
-import TextClock from "@/components/TimerPage/TextClock";
+import LoadingSpinner from "./LoadingSpinner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
+
+/** same ClockStatus type you had */
 export interface ClockStatus {
   mixingStatus: "Idle" | "In Progress" | "Completed";
-  bakingStatus: "Idle" | "In Progress" | "Completed";
   fillingStatus: "Idle" | "In Progress" | "Completed";
+  bakingStatus: "Idle" | "In Progress" | "Completed";
   fillingTimestampStatus: "Idle" | "In Progress";
   bakingTimestampStatus: "Idle" | "In Progress";
 }
@@ -35,6 +50,7 @@ export default function TimerPage() {
     updateSettings,
     baking_timestamp,
     filling_timestamp,
+    isConfigLoaded
   } = useContext(ProcessSettingsContext);
 
   const deriveTime = (totalSeconds: number | undefined): Time => {
@@ -46,119 +62,170 @@ export default function TimerPage() {
     };
   };
 
-  // Derived times
-  const mixingTime = useMemo(() => deriveTime((filling_prep_duration ?? 0) + (mixing_duration ?? 0)), [filling_prep_duration, mixing_duration]);
-  const bakingTime = useMemo(() => deriveTime(baking_duration), [baking_duration]);
+
+
+  // Derived base durations (immutable references)
+  const mixingTime = useMemo(
+    () => deriveTime((filling_prep_duration ?? 0) + (mixing_duration ?? 0)),
+    [filling_prep_duration, mixing_duration]
+  );
+
+  const [mixingIteration, setMixingIteration] = useState(current_mixing_iteration);
+  const [fillingIteration, setFillingIteration] = useState(current_filling_iteration);
+  const [bakingIteration, setBakingIteration] = useState(current_baking_iteration);
+
   const fillingTime = useMemo(() => deriveTime(filling_duration), [filling_duration]);
+  const bakingTime = useMemo(() => deriveTime(baking_duration), [baking_duration]);
   const fillingTimeStampTime = useMemo(() => deriveTime(filling_timestamp), [filling_timestamp]);
   const bakingTimeStampTime = useMemo(() => deriveTime(baking_timestamp), [baking_timestamp]);
 
-  // States
+  // State
   const [isOperationRunning, setIsOperationRunning] = useState(false);
-  const [mixingIteration, setMixingIteration] = useState(current_mixing_iteration);
-  const [bakingIteration, setBakingIteration] = useState(current_baking_iteration);
-  const [fillingIteration, setFillingIteration] = useState(current_filling_iteration);
-
   const [mixingClock, setMixingClock] = useState<Time>(mixingTime);
-  const [bakingClock, setBakingClock] = useState<Time>(bakingTime);
   const [fillingClock, setFillingClock] = useState<Time>(fillingTime);
+  const [bakingClock, setBakingClock] = useState<Time>(bakingTime);
   const [fillingTimestampClock, setFillingTimestampClock] = useState<Time>(fillingTimeStampTime);
   const [bakingTimestampClock, setBakingTimestampClock] = useState<Time>(bakingTimeStampTime);
 
   const [clockStates, setClockStates] = useState<ClockStatus>({
     mixingStatus: "Idle",
-    bakingStatus: "Idle",
     fillingStatus: "Idle",
+    bakingStatus: "Idle",
     fillingTimestampStatus: "Idle",
     bakingTimestampStatus: "Idle",
   });
 
-  
-  const [, setCycleNotifications] = useState({
-    mixing: false,
-    filling: false,
-    baking: false,
-  });
+  // Refs to prevent stale closures
+  const clockStatesRef = useRef(clockStates);
+  const intervalRef = useRef<number | null>(null);
+  const bakingClockStartedRef = useRef(false);
+  const fillingBatchIncrementedRef = useRef(false);
+  const isFillingFirstRenderRef = useRef(true);
+  const initializedRef = useRef(false);
 
-  const [pendingIteration, setPendingIteration] = useState<{ type: "MIXING" | "FILLING" | "BAKING"; next: number } | null>(null);
-
-  // Update only when its own duration changes
-  useEffect(() => setMixingClock(mixingTime), [mixingTime]);
-  useEffect(() => setFillingClock(fillingTime), [fillingTime]);
-  useEffect(() => setBakingClock(bakingTime), [bakingTime]);
-
-  // Sync iterations with context
-  useEffect(() => setMixingIteration(current_mixing_iteration), [current_mixing_iteration]);
-  useEffect(() => setFillingIteration(current_filling_iteration), [current_filling_iteration]);
-  useEffect(() => setBakingIteration(current_baking_iteration), [current_baking_iteration]);
-
-
-  //Clock State Manager
   useEffect(() => {
-    const mixingLeft = toSeconds(mixingClock.hours, mixingClock.minutes, mixingClock.seconds);
-    const fillingLeft = toSeconds(fillingClock.hours, fillingClock.minutes, fillingClock.seconds);
-    const bakingLeft = toSeconds(bakingClock.hours, bakingClock.minutes, bakingClock.seconds);
+    if (!isConfigLoaded || initializedRef.current) return;
 
-    const mixingElapsed = toSeconds(mixingTime.hours, mixingTime.minutes, mixingTime.seconds) - mixingLeft;
-    const fillingElapsed = toSeconds(fillingTime.hours, fillingTime.minutes, fillingTime.seconds) - fillingLeft;
+    initializedRef.current = true; // prevent re-run on next refresh
 
-    setClockStates(prevState => {
-      return {
-        // 🧁 MIXING — always runs when started
-        mixingStatus:
-          !isOperationRunning
-            ? "Idle"
-            : mixingIteration === cycles && mixingLeft <= 0
-              ? "Completed"
-              : "In Progress",
+    // Initialize local states from backend values
+    setMixingIteration(current_mixing_iteration ?? 1);
+    setFillingIteration(current_filling_iteration ?? 1);
+    setBakingIteration(current_baking_iteration ?? 1);
 
-        // 🍥 FILLING — starts after mixing timestamp reaches 0
-        fillingStatus:
-          !isOperationRunning
-            ? "Idle"
-            : fillingIteration === cycles && fillingLeft <= 0
-              ? "Completed"
-              : (mixingElapsed >= (filling_timestamp ?? 0) || mixingIteration > 1)
-                ? "In Progress"
-                : "Idle",
+    // Sync clocks (not reset them again later)
+    setMixingClock(mixingTime);
+    setFillingClock(fillingTime);
+    setBakingClock(bakingTime);
+    setFillingTimestampClock(fillingTimeStampTime);
+    setBakingTimestampClock(bakingTimeStampTime);
 
-        // 🍞 BAKING — starts ONLY when fillingClock is active and its timestamp reaches 0
-        bakingStatus:
-          !isOperationRunning
-            ? "Idle"
-            : bakingIteration === cycles && bakingLeft <= 0
-              ? "Completed"
-              : (
-                // Filling must already be running
-                (prevState.fillingStatus === "In Progress" &&
-                  fillingElapsed >= (baking_timestamp ?? 0)) ||
-                fillingIteration > 1 // allow parallel after first
-              )
-                ? "In Progress"
-                : "Idle",
+  }, [isConfigLoaded]);
 
-        // 🕒 FILLING TIMESTAMP — runs during mixing only
-        fillingTimestampStatus:
-          !isOperationRunning
-            ? "Idle"
-            : mixingElapsed < (filling_timestamp ?? 0) &&
-              mixingIteration <= cycles
-              ? "In Progress"
-              : "Idle",
 
-        // 🕒 BAKING TIMESTAMP — runs during filling only (✅ fixed)
-        bakingTimestampStatus:
-          !isOperationRunning
-            ? "Idle"
-            : prevState.fillingStatus === "In Progress" &&
-              fillingElapsed < (baking_timestamp ?? 0) &&
-              fillingIteration <= cycles
-              ? "In Progress"
-              : "Idle",
-      }
-    });
+
+
+
+  // Tick function — advances clocks
+  const tick = () => {
+    const cs = clockStatesRef.current;
+
+    // === MIXING CLOCK ===
+    if (cs.mixingStatus === "In Progress") setMixingClock(prev => decrementTime(prev));
+
+    // === FILLING TIMESTAMP CLOCK ===
+    if (cs.fillingTimestampStatus === "In Progress") {
+      setFillingTimestampClock(prev => {
+        const next = decrementTime(prev);
+        if (isZero(next)) {
+          setClockStates(prev => ({
+            ...prev,
+            fillingTimestampStatus: "Idle",
+            fillingStatus: "In Progress", // start filling clock now
+            bakingTimestampStatus: "In Progress",
+          }));
+          setFillingClock(fillingTime); // start filling for first batch
+          setBakingTimestampClock(bakingTimeStampTime);
+        }
+        return next;
+      });
+    }
+
+    // === FILLING CLOCK ===
+    if (cs.fillingStatus === "In Progress") setFillingClock(prev => decrementTime(prev));
+
+    // === BAKING TIMESTAMP CLOCK ===
+    if (cs.bakingTimestampStatus === "In Progress") {
+      setBakingTimestampClock(prev => {
+        const next = decrementTime(prev);
+        if (isZero(next)) bakingClockStartedRef.current = true; // start bakingClock permanently
+        return next;
+      });
+    }
+
+    // === BAKING CLOCK ===
+    if (bakingClockStartedRef.current) setBakingClock(prev => decrementTime(prev));
+  };
+
+  useEffect(() => { clockStatesRef.current = clockStates; }, [clockStates]);
+
+  // Centralized timer interval
+  useEffect(() => {
+    if (!isOperationRunning) {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRef.current = null;
+      return;
+    }
+    intervalRef.current = window.setInterval(() => tick(), 1000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); intervalRef.current = null; };
+  }, [isOperationRunning]);
+
+  // Clock state transitions
+  useEffect(() => {
+    const mixLeft = toSeconds(mixingClock.hours, mixingClock.minutes, mixingClock.seconds);
+    const fillLeft = toSeconds(fillingClock.hours, fillingClock.minutes, fillingClock.seconds);
+    const bakeLeft = toSeconds(bakingClock.hours, bakingClock.minutes, bakingClock.seconds);
+    const mixElapsed = toSeconds(mixingTime.hours, mixingTime.minutes, mixingTime.seconds) - mixLeft;
+    const fillElapsed = toSeconds(fillingTime.hours, fillingTime.minutes, fillingTime.seconds) - fillLeft;
+
+    setClockStates(prev => ({
+      mixingStatus: !isOperationRunning
+        ? "Idle"
+        : mixingIteration === cycles && mixLeft <= 0
+          ? "Completed"
+          : "In Progress",
+
+      fillingStatus: !isOperationRunning
+        ? "Idle"
+        : fillingIteration === cycles && fillLeft <= 0
+          ? "Completed"
+          : (mixingIteration === 1 && clockStatesRef.current.fillingTimestampStatus === "In Progress")
+            ? "Idle" // first batch: wait for timestamp
+            : "In Progress", // subsequent batches: run immediately
+
+
+      bakingStatus: !isOperationRunning
+        ? "Idle"
+        : bakingIteration === cycles && bakeLeft <= 0
+          ? "Completed"
+          : bakingClockStartedRef.current
+            ? "In Progress"
+            : "Idle",
+
+      fillingTimestampStatus: !isOperationRunning
+        ? "Idle"
+        : prev.mixingStatus === "In Progress" && mixElapsed < (filling_timestamp ?? 0) && mixingIteration <= cycles
+          ? "In Progress"
+          : "Idle",
+
+      bakingTimestampStatus: !isOperationRunning
+        ? "Idle"
+        : prev.fillingStatus === "In Progress" && fillElapsed < (baking_timestamp ?? 0) && fillingIteration <= cycles
+          ? "In Progress"
+          : "Idle",
+    }));
+
   }, [
-    isOperationRunning,
     mixingClock,
     fillingClock,
     bakingClock,
@@ -170,166 +237,192 @@ export default function TimerPage() {
     fillingTime,
     filling_timestamp,
     baking_timestamp,
-    clockStates.fillingStatus, // important dependency
   ]);
 
-
-
-
-  // Handle pending iteration
+  // Handle clock completions
   useEffect(() => {
-    if (!pendingIteration) return;
-    const { type, next } = pendingIteration;
+    if (isZero(mixingClock) && mixingIteration < cycles) {
+      const newMix = mixingIteration + 1;
+      setMixingIteration(newMix);
+      setMixingClock(mixingTime);
+      setFillingTimestampClock(fillingTimeStampTime);
+      updateSettings({ current_mixing_iteration: newMix }).catch(() => { });
+    }
+  }, [mixingClock]);
 
-    if (type === "MIXING") setMixingIteration(next);
-    if (type === "FILLING") setFillingIteration(next);
-    if (type === "BAKING") setBakingIteration(next);
+  //Handle Filling clock behaviour
+  useEffect(() => {
+    if (isFillingFirstRenderRef.current) {
+      isFillingFirstRenderRef.current = false;
+      return;
+    }
 
-    updateSettings({
-      current_mixing_iteration: type === "MIXING" ? next : undefined,
-      current_filling_iteration: type === "FILLING" ? next : undefined,
-      current_baking_iteration: type === "BAKING" ? next : undefined,
-    });
+    const totalSeconds = toSeconds(fillingClock.hours, fillingClock.minutes, fillingClock.seconds);
+    const fullDuration = toSeconds(fillingTime.hours, fillingTime.minutes, fillingTime.seconds);
 
-    setPendingIteration(null);
-  }, [pendingIteration, updateSettings]);
+    // Reset increment flag when clock is ticking
+    if (totalSeconds < fullDuration && totalSeconds > 0) {
+      fillingBatchIncrementedRef.current = false;
+    }
+
+    // Increment batch every time clock resets to full duration
+    if (totalSeconds === fullDuration && !fillingBatchIncrementedRef.current && isOperationRunning) {
+     
+      setFillingIteration(prev => {
+        const newBatch = prev + 1;
+
+        // Update context (deferred to avoid React render warnings)
+        setTimeout(() => {
+          updateSettings({ current_filling_iteration: newBatch }).catch(() => { });
+        }, 0);
+
+        fillingBatchIncrementedRef.current = true;
+        return newBatch;
+      });
+    }
+  }, [fillingClock, fillingTime]);
+
+  //Handle Baking clock behaviour
+  useEffect(() => {
+    if (isZero(bakingClock) && bakingIteration < cycles) {
+      const newBake = bakingIteration + 1;
+      setBakingIteration(newBake);
+      setBakingClock(bakingTime);
+      updateSettings({ current_baking_iteration: newBake }).catch(() => { });
+    }
+  }, [bakingClock]);
 
   // Controls
   const startOperations = () => {
-    if (mixingIteration === cycles && bakingIteration === cycles && fillingIteration === cycles) {
-      toast.error("All operations completed", { icon: <Info /> });
+    console.log(cycles == mixingIteration, cycles, mixingIteration)
+    if (cycles == mixingIteration && !isOperationRunning) {
+      toast.error("Operation is already completed", { icon: <TriangleAlert /> });
+      return
+    }
+
+    else if (isOperationRunning) {
+      toast.error("Already running", { icon: <TriangleAlert /> });
       return;
     }
-    if (isOperationRunning) {
-      toast.error("Operations already running", { icon: <CheckCircle /> });
-      return;
-    }
+    setClockStates(prev => ({
+      ...prev,
+      mixingStatus: "In Progress",
+      fillingTimestampStatus: "In Progress",
+    }));
+    setMixingClock(prev => decrementTime(prev));
+    setFillingTimestampClock(prev => decrementTime(prev));
     setIsOperationRunning(true);
-    toast.success("Clocks started", { icon: <CheckCircle /> });
+    toast.success("Operations started", { icon: <CheckCircle /> });
   };
 
   const pauseOperations = () => {
     setIsOperationRunning(false);
-    toast.warning("Clocks paused", { icon: <TriangleAlert /> });
+    toast.warning("Paused", { icon: <TriangleAlert /> });
   };
 
   const resetOperations = async () => {
+    await updateSettings({ current_mixing_iteration: 1, current_filling_iteration: 1, current_baking_iteration: 1 });
     setIsOperationRunning(false);
+    bakingClockStartedRef.current = false;
+    fillingBatchIncrementedRef.current = true;
+    isFillingFirstRenderRef.current = false
     setMixingIteration(1);
     setFillingIteration(1);
     setBakingIteration(1);
-    setCycleNotifications({ mixing: false, filling: false, baking: false });
     setMixingClock(mixingTime);
-    setBakingClock(bakingTime);
     setFillingClock(fillingTime);
+    setBakingClock(bakingTime);
     setFillingTimestampClock(fillingTimeStampTime);
     setBakingTimestampClock(bakingTimeStampTime);
-    await updateSettings({ current_mixing_iteration: 1, current_baking_iteration: 1, current_filling_iteration: 1 });
-    toast.info("Clocks reset", { icon: <Info /> });
+    toast.info("Reset complete", { icon: <Info /> });
   };
 
-  const handleIterationComplete = (type: "MIXING" | "FILLING" | "BAKING") => {
-    if (type === "MIXING") {
-      // Only reset Mixing & prepare next process (Filling timestamp)
-      setMixingClock(mixingTime);
-      setFillingTimestampClock(fillingTimeStampTime);
-      setClockStates(prev => ({ ...prev, fillingTimestampStatus: "In Progress" }));
-      setPendingIteration({ type, next: mixingIteration + 1 });
-    }
-
-    if (type === "FILLING") {
-      // Only reset Filling & prepare next process (Baking timestamp)
-      setFillingClock(fillingTime);
-      setBakingTimestampClock(bakingTimeStampTime);
-      setClockStates(prev => ({ ...prev, bakingTimestampStatus: "In Progress" }));
-      setPendingIteration({ type, next: fillingIteration + 1 });
-    }
-
-    if (type === "BAKING") {
-      // Only reset Baking clock
-      setBakingClock(bakingTime);
-      setPendingIteration({ type, next: bakingIteration + 1 });
-    }
-  };
-
+  if (!isConfigLoaded) return <LoadingSpinner />
 
   return (
     <div className="w-full relative">
-      <section className="w-full">
-        <section className="w-full grid grid-cols-3 gap-4 mb-4">
+      <section className="w-full flex flex-col-reverse lg:flex-col">
+        {/* Controls */}
+        <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
           <PushableButton onClick={startOperations}>
-            <PlayCircle />
-            <p>Start</p>
+            <PlayCircle /><p>Start</p>
           </PushableButton>
           <PushableButton onClick={pauseOperations}>
-            <PauseCircle />
-            <p>Pause</p>
+            <PauseCircle /><p>Pause</p>
           </PushableButton>
-          <PushableButton onClick={resetOperations}>
-            <Recycle />
-            <p>Reset</p>
-          </PushableButton>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <PushableButton>
+                <Recycle /><p>Reset</p>
+              </PushableButton>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. This will permanently reset timers current operation's progress.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel className="cursor-pointer">Cancel</AlertDialogCancel>
+                <AlertDialogAction className="cursor-pointer" onClick={resetOperations}>Continue</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </section>
-        <section className="mb-5 w-full grid grid-cols-2 gap-4 rounded-xl">
-          <TextClock
-            setClock={setFillingTimestampClock}
-            status={clockStates}
-            label="Filling starts in:"
-            clockType="FILLING"
-            time={fillingTimestampClock}
-            initialTime={fillingTimeStampTime}
-            batch={mixingIteration}
-            isOperationRunning={isOperationRunning}
-            style={{
-              borderColor: clockStates.fillingTimestampStatus === "In Progress" ? "border-red-500" : "border-primary",
-              backgroundColor: clockStates.fillingTimestampStatus === "In Progress" ? "bg-red-100" : "",
-              badgeColor: clockStates.fillingTimestampStatus === "In Progress" ? "bg-red-700" : "",
-              timerColor: clockStates.fillingTimestampStatus === "In Progress" ? "text-red-800" : "",
-              labelColor: clockStates.fillingTimestampStatus === "In Progress" ? "text-red-800" : "",
-            }}
-          />
-          <TextClock
-            setClock={setBakingTimestampClock}
-            status={clockStates}
-            label="Baking starts in:"
-            clockType="BAKING"
-            time={bakingTimestampClock}
-            initialTime={bakingTimeStampTime}
-            batch={fillingIteration}
-            isOperationRunning={isOperationRunning}
-            style={{
-              borderColor: clockStates.bakingTimestampStatus === "In Progress" ? "border-red-500" : "border-primary",
-              backgroundColor: clockStates.bakingTimestampStatus === "In Progress" ? "bg-red-100" : "",
-              badgeColor: clockStates.bakingTimestampStatus === "In Progress" ? "bg-red-700" : "",
-              timerColor: clockStates.bakingTimestampStatus === "In Progress" ? "text-red-800" : "",
-              labelColor: clockStates.bakingTimestampStatus === "In Progress" ? "text-red-800" : "",
-            }}
-          />
-        </section>
-        <section className="w-full flex gap-4 mb-4">
-          {["Mixing", "Filling", "Baking"].map((label, idx) => {
-            const clocks = [mixingClock, fillingClock, bakingClock];
-            const initialTimes = [mixingTime, fillingTime, bakingTime];
-            const iterations = [mixingIteration, fillingIteration, bakingIteration];
-            const onComplete = ["MIXING", "FILLING", "BAKING"] as const;
-            return (
-              <Clock
-                key={label}
-                label={label}
-                time={clocks[idx]}
-                initialTime={initialTimes[idx]}
-                setTime={[setMixingClock, setFillingClock, setBakingClock][idx]}
-                batch={iterations[idx]}
-                isOperationRunning={isOperationRunning}
-                status={clockStates}
-                onIterationComplete={() => {
-                  if (iterations[idx] < (cycles ?? 1)) handleIterationComplete(onComplete[idx]);
-                }}
-              />
-            );
-          })}
-        </section>
+        <div>
+          {/* Timestamps */}
+          <section className="mb-5 w-full grid grid-cols-1 md:grid-cols-2 gap-4 rounded-xl">
+            <TextClock
+              label="Filling starts in:"
+              status={clockStates}
+              time={fillingTimestampClock}
+              batch={mixingIteration}
+              isOperationRunning={isOperationRunning}
+              style={{
+                borderColor: toSeconds(fillingTimestampClock.hours, fillingTimestampClock.minutes, fillingTimestampClock.seconds) === 0 ? "border-primary" : "border-red-700",
+                backgroundColor: toSeconds(fillingTimestampClock.hours, fillingTimestampClock.minutes, fillingTimestampClock.seconds) === 0 ? "" : "bg-red-100",
+                timerColor: toSeconds(fillingTimestampClock.hours, fillingTimestampClock.minutes, fillingTimestampClock.seconds) === 0 ? "text-primary" : "text-red-800",
+                badgeColor: toSeconds(fillingTimestampClock.hours, fillingTimestampClock.minutes, fillingTimestampClock.seconds) === 0 ? "bg-primary" : "bg-red-500",
+                labelColor: toSeconds(fillingTimestampClock.hours, fillingTimestampClock.minutes, fillingTimestampClock.seconds) === 0 ? "text-primary" : "text-red-800"
+              }}
+            />
+            <TextClock
+              label="Baking starts in:"
+              status={clockStates}
+              time={bakingTimestampClock}
+              batch={fillingIteration}
+              isOperationRunning={isOperationRunning}
+              style={{
+                borderColor: clockStates.fillingStatus !== "In Progress" && clockStates.fillingStatus !== "Completed" ? "border-yellow-300" : toSeconds(bakingTimestampClock.hours, bakingTimestampClock.minutes, bakingTimestampClock.seconds) === 0 ? "border-primary" : "border-red-700",
+                backgroundColor: clockStates.fillingStatus !== "In Progress" && clockStates.fillingStatus !== "Completed" ? "bg-yellow-100/20" : toSeconds(bakingTimestampClock.hours, bakingTimestampClock.minutes, bakingTimestampClock.seconds) === 0 ? "" : "bg-red-100",
+                timerColor: clockStates.fillingStatus !== "In Progress" && clockStates.fillingStatus !== "Completed" ? "text-yellow-600/20" : toSeconds(bakingTimestampClock.hours, bakingTimestampClock.minutes, bakingTimestampClock.seconds) === 0 ? "text-primary" : "text-red-800",
+                badgeColor: clockStates.fillingStatus !== "In Progress" && clockStates.fillingStatus !== "Completed" ? "bg-yellow-600/20 text-yellow-600/20" : toSeconds(bakingTimestampClock.hours, bakingTimestampClock.minutes, bakingTimestampClock.seconds) === 0 ? "bg-primary" : "bg-red-500",
+                labelColor: clockStates.fillingStatus != "In Progress" && clockStates.fillingStatus !== "Completed" ? "text-yellow-600/20" : toSeconds(bakingTimestampClock.hours, bakingTimestampClock.minutes, bakingTimestampClock.seconds) === 0 ? "text-primary" : "text-red-800"
+              }}
+            />
+          </section>
+
+          {/* Main Clocks */}
+          <section className="w-full  grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <Clock label="Mixing" time={mixingClock} initialTime={mixingTime} status={clockStates} batch={mixingIteration} />
+            <Clock label="Filling" time={fillingClock} initialTime={fillingTime} status={clockStates} batch={fillingIteration} />
+            <Clock label="Baking" time={bakingClock} initialTime={bakingTime} status={clockStates} batch={bakingIteration} />
+          </section>
+        </div>
+        
       </section>
     </div>
   );
+}
+
+// helpers
+function decrementTime(time: Time): Time {
+  const total = toSeconds(time.hours, time.minutes, time.seconds);
+  const newTotal = total > 0 ? total - 1 : 0;
+  return { hours: Math.floor(newTotal / 3600), minutes: Math.floor((newTotal % 3600) / 60), seconds: newTotal % 60 };
+}
+
+function isZero(time: Time) {
+  return time.hours === 0 && time.minutes === 0 && time.seconds === 0;
 }

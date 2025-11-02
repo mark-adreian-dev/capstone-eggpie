@@ -13,6 +13,7 @@ export interface ProcessSetting {
   current_filling_iteration: number
   baking_timestamp: number,
   filling_timestamp: number,
+  isConfigLoaded: boolean,
   cycles: number;
   half_day: boolean
 }

@@ -19,10 +19,12 @@ export interface ProcessSettingsContextInitialValueContext {
   oven_count: number
   cycles: number
   isLoading: boolean
+  isConfigLoaded: boolean
   isError: boolean
   successMessage: string
   errorMessage: string
   loadSettings: () => Promise<void>
+  resetIterations: () => Promise<void>
   updateSettings: (data: Partial<ProcessSetting>) => Promise<void>
 }
 
@@ -36,6 +38,7 @@ export const processSettingsInitialValue: ProcessSettingsContextInitialValueCont
   trays_per_cycle: 0,
   egg_pies_per_tray: 0,
   oven_count: 0,
+  isConfigLoaded: false,
   half_day: false,
   current_mixing_iteration: 0,
   current_baking_iteration: 0,
@@ -48,6 +51,7 @@ export const processSettingsInitialValue: ProcessSettingsContextInitialValueCont
   successMessage: "",
   errorMessage: "",
   loadSettings: async () => { },
+  resetIterations: async () => { },
   updateSettings: async (data: Partial<ProcessSetting>) => {console.log(data)}
 };
 

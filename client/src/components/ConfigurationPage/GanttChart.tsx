@@ -7,7 +7,7 @@ import {
   YAxis,
   CartesianGrid,
   LabelList,
-
+  Cell,
 } from "recharts"
 
 interface CycleData {
@@ -29,7 +29,7 @@ const timeToSeconds = (time: string) => {
   return h * 3600 + m * 60 + s
 }
 
-// ✅ Helper: convert seconds → "hh:mm am/pm"
+// ✅ Convert seconds → "hh:mm am/pm"
 const secondsToTimeLabel = (seconds: number): string => {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
@@ -42,7 +42,7 @@ const GanttChart: React.FC<GanttChartProps> = ({ data, operationsStart, operatio
   const startSeconds = timeToSeconds(operationsStart)
   const endSeconds = timeToSeconds(operationsEnd)
 
-  // ✅ Compute start offset and duration in hours
+  // ✅ Build chart data for each cycle
   const chartData = data.map((cycle) => {
     const start = timeToSeconds(cycle.startTime)
     const end = timeToSeconds(cycle.endTime)
@@ -51,10 +51,30 @@ const GanttChart: React.FC<GanttChartProps> = ({ data, operationsStart, operatio
       offset: (start - startSeconds) / 3600, // spacer before start
       duration: (end - start) / 3600, // duration in hours
       label: `${cycle.startTime} → ${cycle.endTime}`,
+      isExcess: false,
     }
   })
 
-  const totalHours = (endSeconds - startSeconds) / 3600
+  // ✅ Check for overflow (actual end > operations end)
+  const actualEndSeconds = Math.max(...data.map((c) => timeToSeconds(c.endTime)))
+  const excessSeconds = Math.max(0, actualEndSeconds - endSeconds)
+
+  // ✅ Add a red overflow bar if there's excess time
+  if (excessSeconds > 0) {
+    chartData.push({
+      cycle: "Excess Time",
+      offset: (endSeconds - startSeconds) / 3600, // starts right after operationsEnd
+      duration: excessSeconds / 3600,
+      label: `+${excessSeconds}s overflow`,
+      isExcess: true,
+    })
+  }
+
+  // ✅ Extend chart domain if overflow exists
+  const totalHours = Math.max(
+    (endSeconds - startSeconds) / 3600,
+    (actualEndSeconds - startSeconds) / 3600
+  )
 
   return (
     <div className="w-full h-[400px]">
@@ -62,7 +82,7 @@ const GanttChart: React.FC<GanttChartProps> = ({ data, operationsStart, operatio
         <BarChart
           data={chartData}
           layout="vertical"
-          margin={{ top: 20, right: 30, left: 100, bottom: 20 }}
+          margin={{ top: 20, right: 30, left: 0, bottom: 20 }}
         >
           <CartesianGrid strokeDasharray="3 3" />
 
@@ -82,12 +102,18 @@ const GanttChart: React.FC<GanttChartProps> = ({ data, operationsStart, operatio
 
           <YAxis dataKey="cycle" type="category" />
 
-          {/* Invisible offset to shift bar */}
+          {/* Invisible offset for spacing */}
           <Bar dataKey="offset" stackId="a" fill="transparent" />
 
-          {/* Visible bar */}
-          <Bar dataKey="duration" stackId="a" fill="var(--primary)" radius={[8, 8, 8, 8]}>
+          {/* Visible duration bar */}
+          <Bar dataKey="duration" stackId="a" radius={[8, 8, 8, 8]}>
             <LabelList dataKey="label" position="inside" fill="#fff" />
+            {chartData.map((entry, index) => (
+              <Cell
+                key={`cell-${index}`}
+                fill={entry.isExcess ? "#ef4444" : "var(--primary)"}
+              />
+            ))}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
